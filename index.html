@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#1f6f3f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="DAS 현황">
+<title>DAS 현황</title>
+<style>
+:root{
+  --bg:#f3f4f6; --card:#ffffff; --text:#1f2328; --sub:#6b7280; --line:#e5e7eb; --track:#e9ebef;
+  --green:#2ea043; --blue:#3478dc; --red:#d73228; --amber:#dc8200; --gray:#8a8f98; --alarm-bg:#fff0ee;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#111418; --card:#1b1f24; --text:#e6e8eb; --sub:#9aa1ab; --line:#2b3138; --track:#2b3138; --alarm-bg:#3a1f1c; }
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic","맑은 고딕",sans-serif;-webkit-text-size-adjust:100%}
+.wrap{max-width:860px;margin:0 auto;padding:12px 16px calc(24px + env(safe-area-inset-bottom))}
+header{display:flex;align-items:center;gap:10px;margin:4px 0 10px}
+header h1{font-size:19px;margin:0;flex:1}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:8px;padding:7px 12px;cursor:pointer}
+button:disabled{opacity:.5}
+.banner{border-radius:10px;padding:14px 16px;color:#fff;font-size:20px;font-weight:700;background:var(--gray)}
+.src{font-size:12px;color:var(--sub);margin:6px 2px 4px}
+.warn{color:var(--amber);font-size:13px;margin:4px 2px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-top:12px}
+.card h2{font-size:15px;margin:0 0 8px}
+.alarm{background:var(--alarm-bg);border-color:transparent}
+.alarm .t{color:var(--red);font-weight:700;font-size:16px;word-break:break-all}
+.alarm .s{font-size:13px;margin-top:4px}
+.big{font-size:24px;font-weight:700;margin:4px 0}
+.bar{height:10px;background:var(--track);border-radius:5px;overflow:hidden;margin:3px 0 6px}
+.bar.lg{height:14px;border-radius:7px}
+.bar>i{display:block;height:100%;border-radius:inherit}
+.line{font-size:14px;margin:2px 0}
+.muted{color:var(--sub);font-size:13px}
+.eta{font-size:15px;font-weight:700;margin-top:4px}
+.row{margin:8px 0 2px}
+.row .h{display:flex;font-size:14px}
+.row .h b{flex:1}
+.row .d{font-size:12px;color:var(--sub)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:0 18px}
+.recent div{font-size:13px;padding:3px 0;border-bottom:1px solid var(--line);word-break:break-all}
+.recent div:last-child{border-bottom:0}
+.foot{font-size:11px;color:var(--sub);margin-top:16px;line-height:1.6}
+.setup{max-width:420px;margin:40px auto;text-align:center}
+.setup input{font:inherit;width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--text);margin:10px 0}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#333;color:#fff;padding:9px 14px;border-radius:8px;font-size:13px;opacity:0;transition:opacity .3s;pointer-events:none;max-width:90vw}
+.toast.on{opacity:.95}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<div class="toast" id="toast"></div>
+<script>
+"use strict";
+// DAS 현황 (웹, 보기 전용): DasAlarm v1.5.1 의 보기 전용 중계(ntfy)를 받아 브라우저에서 풀어 보여 줌.
+// 보기 코드는 이 파일에 들어 있지 않음 — 주소 끝 #k=보기코드 로 받아 이 브라우저에만 저장.
+// 보기 코드로는 상태만 볼 수 있고 DAS 를 조작할 수 없음 (보내는 것은 '새로 받기' 요청뿐, PC가 2분에 한 번만 응답).
+const RELAY = "https://ntfy.sh";
+const LS = "dasview.key";
+const enc = new TextEncoder(), dec = new TextDecoder();
+const $ = id => document.getElementById(id);
+let key = "", topicS = "", topicC = "", ekKey = null, mkKey = null;
+let status = null, seenAt = 0, relayState = "연결 중", es = null, lastId = null, refreshAt = 0, notifiedId = "";
+
+function store(k, v){ try{ if(v===null) localStorage.removeItem(k); else localStorage.setItem(k, v); }catch(e){} }
+function load(k){ try{ return localStorage.getItem(k) || ""; }catch(e){ return ""; } }
+function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function toast(m){ const t=$("toast"); t.textContent=m; t.classList.add("on"); clearTimeout(toast.h); toast.h=setTimeout(()=>t.classList.remove("on"),3500); }
+function n(v){ return Number(v||0).toLocaleString("ko-KR"); }
+function pct(v,d){ return Number(v||0).toFixed(d==null?0:d)+"%"; }
+function hm(ts){ return ts && ts.length>=16 ? ts.substring(11,16) : (ts||""); }
+function hms(ts){ return ts && ts.length>=19 ? ts.substring(11,19) : (ts||""); }
+function mdhm(ts){ return ts && ts.length>=16 ? ts.substring(5,16) : (ts||""); }
+function ageSec(ts){ if(!ts) return -1; const t=Date.parse(ts.replace(" ","T")+"+09:00"); return isNaN(t)?-1:Math.max(0,Math.round((Date.now()-t)/1000)); }
+function ago(s){ if(s<0) return ""; if(s<60) return s+"초 전"; if(s<3600) return Math.floor(s/60)+"분 전"; return Math.floor(s/3600)+"시간 "+Math.floor(s%3600/60)+"분 전"; }
+function hex(b){ return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,"0")).join(""); }
+function b64d(s){ const bin=atob(s); const u=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) u[i]=bin.charCodeAt(i); return u; }
+function b64e(u){ let s=""; for(let i=0;i<u.length;i++) s+=String.fromCharCode(u[i]); return btoa(s); }
+
+// ---------- 암호 (PC DasAlarm RelayCrypto 와 같은 방식) ----------
+async function hmacRaw(keyBytes, data){
+  const k = await crypto.subtle.importKey("raw", keyBytes, {name:"HMAC", hash:"SHA-256"}, false, ["sign"]);
+  return new Uint8Array(await crypto.subtle.sign("HMAC", k, data));
+}
+async function derive(k){
+  const master = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode("DasAlarm view v1|" + k)));
+  const ek = await hmacRaw(master, enc.encode("enc"));
+  const mk = await hmacRaw(master, enc.encode("mac"));
+  const t = await hmacRaw(master, enc.encode("topic"));
+  const h = hex(t.slice(0,12));
+  topicS = "dasview-" + h + "-s"; topicC = "dasview-" + h + "-c";
+  ekKey = await crypto.subtle.importKey("raw", ek, {name:"AES-CBC"}, false, ["encrypt","decrypt"]);
+  mkKey = await crypto.subtle.importKey("raw", mk, {name:"HMAC", hash:"SHA-256"}, false, ["sign","verify"]);
+}
+async function openToken(tok){
+  try{
+    if(!tok || !tok.startsWith("DA1.")) return null;
+    const all = b64d(tok.substring(4).trim());
+    if(all.length < 64 || (all.length-48)%16 !== 0) return null;
+    const n = all.length-32, ivct = all.slice(0,n), tag = all.slice(n);
+    if(!await crypto.subtle.verify("HMAC", mkKey, tag, ivct)) return null;
+    const pt = await crypto.subtle.decrypt({name:"AES-CBC", iv: ivct.slice(0,16)}, ekKey, ivct.slice(16));
+    return dec.decode(pt);
+  }catch(e){ return null; }
+}
+async function seal(plain){
+  const iv = crypto.getRandomValues(new Uint8Array(16));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({name:"AES-CBC", iv}, ekKey, enc.encode(plain)));
+  const ivct = new Uint8Array(16+ct.length); ivct.set(iv,0); ivct.set(ct,16);
+  const tag = new Uint8Array(await crypto.subtle.sign("HMAC", mkKey, ivct));
+  const all = new Uint8Array(ivct.length+32); all.set(ivct,0); all.set(tag,ivct.length);
+  return "DA1." + b64e(all);
+}
+async function gunzip(u){
+  if(typeof DecompressionStream === "undefined") throw new Error("이 브라우저는 압축 풀기를 지원하지 않습니다 (iOS 16.4 이상, 최신 크롬·엣지 필요)");
+  const s = new Blob([u]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return await new Response(s).text();
+}
+async function unwrap(plain){
+  if(!plain) return null;
+  let o; try{ o=JSON.parse(plain); }catch(e){ return null; }
+  if(o.k==="vs") return o;
+  if(o.k!=="vz") return null;
+  try{ const s=JSON.parse(await gunzip(b64d(o.z||""))); return s.k==="vs"?s:null; }catch(e){ relayState = e.message; return null; }
+}
+function accept(s, t){
+  if(!s) return;
+  if(!status || (s.time||"") >= (status.time||"")) status = s;
+  if(t && t > seenAt) seenAt = t;
+  render(); notify();
+}
+
+// ---------- 중계 받기 ----------
+async function pollLast(){
+  const r = await fetch(RELAY + "/" + topicS + "/json?poll=1&since=3h", {cache:"no-store"});
+  if(!r.ok) throw new Error("HTTP " + r.status);
+  const lines = (await r.text()).split("\n");
+  let last = null, lt = 0, undecodable = 0;
+  for(const ln of lines){
+    if(!ln.trim()) continue;
+    let ev; try{ ev=JSON.parse(ln); }catch(e){ continue; }
+    if(ev.event!=="message") continue;
+    lastId = ev.id || lastId;
+    const s = await unwrap(await openToken(ev.message));
+    if(s){ last=s; lt=ev.time*1000; } else undecodable++;
+  }
+  if(last) accept(last, lt);
+  else if(undecodable) relayState = "받은 내용을 풀 수 없습니다 (보기 코드 확인)";
+  else relayState = "최근 3시간 동안 PC 신호 없음";
+  render();
+}
+function subscribe(){
+  if(es) es.close();
+  const url = RELAY + "/" + topicS + "/sse" + (lastId ? "?since=" + encodeURIComponent(lastId) : "");
+  es = new EventSource(url);
+  es.onopen = () => { relayState = "정상"; render(); };
+  es.onerror = () => { relayState = "재연결 중"; render(); };
+  es.onmessage = async e => {
+    let ev; try{ ev=JSON.parse(e.data); }catch(x){ return; }
+    if(ev.event && ev.event!=="message") return;
+    if(ev.id) lastId = ev.id;
+    const s = await unwrap(await openToken(ev.message));
+    if(s) accept(s, ev.time*1000);
+  };
+}
+async function refresh(manual){
+  const now = Date.now();
+  if(now - refreshAt < 180000){ if(manual) toast("방금 요청했습니다. PC 응답을 기다리는 중입니다 (최대 2~3분)."); return; }
+  if(!manual && seenAt && now - seenAt < 180000) return;
+  refreshAt = now;
+  try{
+    const body = await seal(JSON.stringify({k:"vr", t:now, n:(crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2))}));
+    const r = await fetch(RELAY + "/" + topicC, {method:"POST", body});
+    if(manual) toast(r.ok ? "PC에 새로 받기를 요청했습니다. 1~2분 안에 바뀝니다." : "중계 서버 응답 " + r.status);
+  }catch(e){ if(manual) toast("중계 서버에 연결할 수 없습니다."); }
+}
+function online(){
+  if(!seenAt || !status) return false;
+  const hb = Math.max(10, status.hb||30);
+  return Date.now() - seenAt < (Math.max(hb*2,70)+5)*60000;
+}
+
+// ---------- 알림 (이 페이지가 열려 있을 때만) ----------
+function notify(){
+  const a = status && status.active;
+  if(!a || a.ring===false || a.id===notifiedId) return;
+  const first = notifiedId==="" && load("dasview.notified")===a.id;
+  notifiedId = a.id; store("dasview.notified", a.id);
+  if(first) return;
+  try{ if("Notification" in window && Notification.permission==="granted") new Notification((a.test?"[시험] ":"")+"DAS 오류 "+hm(a.at), {body:a.text||"", tag:"das-alert"}); }catch(e){}
+  try{ navigator.vibrate && navigator.vibrate([300,150,300]); }catch(e){}
+}
+
+// ---------- 화면 ----------
+function stColor(st){ return st==="완료"?"var(--green)":st==="진행중"?"var(--blue)":(st==="정지/대기"||st==="미입고 대기")?"var(--amber)":"var(--gray)"; }
+function bar(p,color,lg){ const v=Math.max(0,Math.min(100,Number(p||0))); return `<div class="bar${lg?" lg":""}"><i style="width:${v}%;background:${color}"></i></div>`; }
+function row(label,right,p,color,sub){ return `<div class="row"><div class="h"><b>${esc(label)}</b><span style="color:${color}">${esc(right)}</span></div>${bar(p,color)}${sub?`<div class="d">${esc(sub)}</div>`:""}</div>`; }
+
+function render(){
+  const app = $("app");
+  if(!key){ renderSetup(); return; }
+  const s = status, on = online();
+  let act = s && s.active; if(act && act.ring===false) act=null;
+  let html = `<header><h1>DAS 현황</h1><button id="btnR">새로고침</button></header>`;
+  let off=[]; (s&&s.watch||[]).forEach(w=>{ if(!w.running) off.push(w.name); });
+  if(!s) html += `<div class="banner" style="background:var(--gray)">PC 연결 확인 중...</div>`;
+  else if(act) html += `<div class="banner" style="background:var(--red)">${act.test?"[시험] ":""}DAS 오류 알람 · ${esc(hm(act.at))}</div>`;
+  else if(!on) html += `<div class="banner" style="background:var(--gray)">PC 연결 안 됨</div>`;
+  else if(off.length) html += `<div class="banner" style="background:var(--amber)">정상 · DAS 프로그램 꺼짐 (${esc(off.join(", "))})</div>`;
+  else html += `<div class="banner" style="background:var(--green)">정상</div>`;
+
+  if(!s){
+    html += `<div class="src">받는 중입니다. 처음에는 1~2분 걸릴 수 있습니다. · 중계: ${esc(relayState)}</div>`;
+    app.innerHTML = html + foot(); bind(); return;
+  }
+  const pa = ageSec(s.time);
+  html += `<div class="src">PC 기준 ${esc(hms(s.time))}${pa>=0?" ("+ago(pa)+")":""} · 중계 ${esc(relayState)}</div>`;
+  if(!on) html += `<div class="warn">PC 신호가 오지 않습니다. DAS PC가 꺼졌거나 인터넷이 끊겼을 수 있습니다. 아래는 마지막으로 받은 내용입니다.</div>`;
+
+  if(act){
+    html += `<div class="card alarm"><div class="t">${esc(act.text)}</div><div class="s">${esc(act.kind)} · ${esc(act.proc)} · ${act.closed?"오류창 닫힘 "+esc(hm(act.closed)):"오류창 떠 있음"}<br><span class="muted">확인·조작은 담당자가 DAS 알람 앱이나 PC에서 합니다.</span></div></div>`;
+  }
+
+  const f = s.f;
+  html += `<div class="card"><h2>작업 진행</h2>`;
+  if(!f) html += `<div class="muted">진행률이 없습니다.</div>`;
+  else if(!f.ok) html += `<div class="warn">${esc(f.error||"진행률을 받을 수 없습니다.")}</div>`;
+  else{
+    const fa = ageSec(f.at);
+    html += `<div class="muted">모니터 기준 ${esc(hms(f.at))}${fa>=0?" ("+ago(fa)+")":""} · ${esc(f.file)}<br>진행률은 바뀌면 ${esc(s.pm||15)}분 간격으로 옵니다 (편 시작·완료는 바로). [새로고침]으로 최신을 요청할 수 있습니다.</div>`;
+    const m = f.m;
+    if(m){
+      const c = stColor(m.st);
+      html += `<div class="big" style="color:${c}">${f.b>0?f.b+"편 ":"전체 "} ${esc(m.st)} ${pct(m.p,1)}</div>${bar(m.p,c,true)}`;
+      html += `<div class="line">완료 ${n(m.d)} / 대상 ${n((m.t||0)-(m.sh||0))} · 남은 ${n(m.rem)}${m.w!=null?` (분배대기 ${n(m.w)} · 미입고 ${n(m.n)})`:""}${m.sh>0?` · 결품 ${n(m.sh)}`:""}</div>`;
+      const s2=[]; if(m.r>0) s2.push("속도 "+n(m.r)+"/h"); if(m.start) s2.push("시작 "+m.start); if(m.last) s2.push("마지막 실적 "+m.last);
+      if(s2.length) html += `<div class="muted">${esc(s2.join(" · "))}</div>`;
+      const s3=[]; if(m.eta && m.st!=="완료") s3.push("예상 종료 "+m.eta); if(m.base) s3.push("통상 "+m.base);
+      if(m.tgt){ let t="기준 "+m.tgt; if(m.over!=null) t+= m.over>0?` (+${m.over}분 초과)`:` (${-m.over}분 여유)`; s3.push(t); }
+      const late = m.late || (m.over!=null && m.over>0);
+      if(s3.length) html += `<div class="eta" style="color:${late?"var(--red)":"inherit"}">${esc(s3.join(" · "))}</div>`;
+    }
+    html += `</div>`;
+    const bs = f.batches||[];
+    if(bs.length>1){
+      html += `<div class="card"><h2>편별</h2>`;
+      bs.forEach(b=>{ html += row(b.b+"편", b.st+" "+pct(b.p), b.p, stColor(b.st), "남은 "+n(b.rem)+(b.eta&&b.rem>0?" · 예상 "+b.eta:"")+(b.rem<=0&&b.last?" · 마지막 실적 "+b.last:"")); });
+      html += `</div>`;
+    }
+    const ct = f.cats||[];
+    if(ct.length){
+      html += `<div class="card"><h2>분류별</h2>`;
+      ct.forEach(c=>{ html += row(c.nm, pct(c.p), c.p, stColor(c.st), "남은 "+n(c.rem)+(c.eta&&c.rem>0?" · 예상 "+c.eta:"")); });
+      html += `</div>`;
+    }
+    const bl = f.blocks||[];
+    if(bl.length){
+      html += `<div class="card"><h2>블럭별${f.unst>0?" · 미착수 "+f.unst+"블럭":""}</h2><div class="grid">`;
+      bl.forEach(b=>{ html += row((b.k===0?"미지정":b.k+"블럭")+(b.k===f.bn?" · 가장 늦음":""), b.st+" "+pct(b.p), b.p, stColor(b.st),
+        b.t!=null ? "완료 "+n(b.d)+" / "+n(b.t)+" · 남은 "+n(b.rem)+(b.eta&&b.rem>0?" · 예상 "+b.eta:"") : ""); });
+      html += `</div></div>`;
+    }
+  }
+  if(f && !f.ok) html += `</div>`;
+  if(!f) html += `</div>`;
+
+  const rc = s.recent||[];
+  if(rc.length){
+    html += `<div class="card recent"><h2>최근 오류 알람</h2>`;
+    rc.forEach(a=>{ const how = a.ack?"확인 "+hm(a.ack):a.closed?"창 닫힘 "+hm(a.closed):""; html += `<div>${esc(mdhm(a.at))} ${a.test?"[시험] ":""}${esc(a.text)}${how?` <span class="muted">(${esc(how)})</span>`:""}</div>`; });
+    html += `</div>`;
+  }
+  app.innerHTML = html + foot(); bind();
+}
+function foot(){
+  const canN = ("Notification" in window) && Notification.permission==="default";
+  return `<div class="foot">보기 전용 · 조작 기능 없음 · 이 페이지를 열어 둔 동안 자동으로 갱신됩니다.<br>
+  휴대폰은 공유 → <b>홈 화면에 추가</b>하면 앱처럼 열 수 있습니다.${canN?` <button id="btnN">오류 알림 허용</button>`:""}
+  <br><button id="btnX" style="margin-top:8px">보기 코드 지우기</button></div>`;
+}
+function bind(){
+  const r=$("btnR"); if(r) r.onclick=()=>refresh(true);
+  const x=$("btnX"); if(x) x.onclick=()=>{ store(LS,null); key=""; if(es) es.close(); status=null; seenAt=0; lastId=null; render(); };
+  const nb=$("btnN"); if(nb) nb.onclick=async()=>{ try{ await Notification.requestPermission(); }catch(e){} render(); };
+}
+function renderSetup(){
+  $("app").innerHTML = `<div class="setup"><h1>DAS 현황</h1><p class="muted">관리자에게 받은 <b>보기 링크</b>로 열거나, 보기 코드를 입력하세요.</p>
+  <input id="k" placeholder="보기 코드" autocomplete="off" autocapitalize="off" spellcheck="false"><button id="ok">보기</button>
+  <p class="muted" style="margin-top:18px">보기 코드로는 DAS 상태만 볼 수 있고 조작할 수 없습니다.</p></div>`;
+  $("ok").onclick=()=>{ const v=$("k").value.trim(); if(v.length<8){ toast("보기 코드는 8자 이상입니다."); return; } start(v); };
+}
+
+async function start(k){
+  if(!window.crypto || !crypto.subtle){ $("app").innerHTML = `<div class="setup"><p class="warn">이 브라우저에서는 열 수 없습니다. https 주소로 열었는지, 최신 브라우저인지 확인하세요.</p></div>`; return; }
+  key = k; store(LS, k);
+  await derive(k);
+  render();
+  try{ await pollLast(); }catch(e){ relayState = "중계 서버 연결 실패 (" + e.message + ")"; render(); }
+  subscribe();
+  refresh(false);
+}
+
+(function init(){
+  setInterval(()=>{ if(key) render(); }, 15000);
+  document.addEventListener("visibilitychange", ()=>{ if(!document.hidden && key){ if(!es || es.readyState===2) subscribe(); refresh(false); } });
+  const m = location.hash.match(/[#&]k=([^&]+)/);
+  if(m){ const k=decodeURIComponent(m[1]); history.replaceState(null, "", location.pathname + location.search); start(k); return; }
+  const k = load(LS);
+  if(k) start(k); else render();
+})();
+</script>
+</body>
+</html>
